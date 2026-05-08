@@ -1,5 +1,6 @@
 package io.github.kituin.chatimage.integration;
 
+
 import io.github.kituin.ChatImageCode.ChatImageFrame;
 import io.github.kituin.ChatImageCode.IClientAdapter;
 import net.minecraft.client.Minecraft;
