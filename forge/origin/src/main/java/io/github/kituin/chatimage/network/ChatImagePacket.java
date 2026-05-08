@@ -4,9 +4,14 @@ import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import io.github.kituin.ChatImageCode.ChatImageFrame;
 import io.github.kituin.ChatImageCode.ChatImageIndex;
+import io.github.kituin.ChatImageCode.NetworkHelper;
 import net.minecraft.client.Minecraft;
 
 
+import java.io.File;
+import java.net.URI;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,10 +59,10 @@ public class ChatImagePacket {
     /**
      * 服务端接收 图片文件分块 的处理
      *
-     * @param player #ServerPlayer#
+     * @param player net.minecraft.server.level.ServerPlayer
      * @param res    String
      */
-    public static void serverFileChannelReceived(#ServerPlayer# player, String res) {
+    public static void serverFileChannelReceived(net.minecraft.server.level.ServerPlayer player, String res) {
         ChatImageIndex title = gson.fromJson(res, ChatImageIndex.class);
         HashMap<Integer, String> blocks = SERVER_BLOCK_CACHE.createBlock(title, res);
         LOGGER.info("[FileChannel->Server:" + title.index + "/" + title.total + "]" + title.url);
@@ -103,10 +108,21 @@ public class ChatImagePacket {
         }
     }
 
-    public static void serverFileInfoChannelReceived(#ServerPlayer# player, String url) {
+    public static void serverFileInfoChannelReceived(net.minecraft.server.level.ServerPlayer player, String url) {
         HashMap<Integer, String> list = SERVER_BLOCK_CACHE.getBlock(url);
+
+        // ========== 修复：同时支持 file:// URI 和本地绝对路径 ==========
+        if (list == null) {
+            boolean isLocalPath = url.startsWith("file://")
+                    || (url.length() > 1 && url.charAt(1) == ':')   // Windows: D:\...
+                    || url.startsWith("/");                          // Linux: /home/...
+            if (isLocalPath) {
+                list = loadLocalFileToCache(url);
+            }
+        }
+        // ============================================================
+
         if (list != null) {
-            // 服务器存在缓存图片,直接发送给客户端
             for (Map.Entry<Integer, String> entry : list.entrySet()) {
                 LOGGER.debug("[GetFileChannel->Client:{}/{}]{}", entry.getKey(), list.size() - 1, url);
                 DownloadFileChannel.sendToPlayer(new DownloadFileChannelPacket(entry.getValue()), player);
@@ -117,11 +133,56 @@ public class ChatImagePacket {
         // 通知客户端无文件
         FileBackChannel.sendToPlayer(new FileInfoChannelPacket("null->" + url), player);
         LOGGER.error("[GetFileChannel]not found in server:{}", url);
-        // 记录uuid,后续有文件了推送
         if (player != null) {
             SERVER_BLOCK_CACHE.tryAddUser(url, player.getStringUUID());
         }
         LOGGER.info("[GetFileChannel]记录uuid:{}", player.getStringUUID());
         LOGGER.info("[not found in server]{}", url);
+    }
+
+    /**
+     * 读取本地文件（支持 file:// URI 和纯本地路径），使用 ChatImage 标准分包逻辑塞入 ServerBlockCache
+     */
+    private static HashMap<Integer, String> loadLocalFileToCache(String fileUrl) {
+        try {
+            File file;
+
+            // 区分 file:// URI 和纯本地路径
+            if (fileUrl.startsWith("file://")) {
+                URI uri = new URI(fileUrl);
+                Path path = Paths.get(uri);
+                file = path.toFile();
+            } else {
+                file = new File(fileUrl);
+            }
+
+            if (!file.exists()) {
+                LOGGER.error("[FileFallback]本地文件不存在:{}", file.getAbsolutePath());
+                return null;
+            }
+
+            // 使用 NetworkHelper 的标准分包逻辑（自动处理大文件分包）
+            List<String> packets = NetworkHelper.createFilePacket(fileUrl, file);
+            if (packets.isEmpty()) {
+                LOGGER.error("[FileFallback]文件分包失败:{}", fileUrl);
+                return null;
+            }
+
+            // 将分包塞入 ServerBlockCache
+            for (String packet : packets) {
+                ChatImageIndex index = gson.fromJson(packet, ChatImageIndex.class);
+                SERVER_BLOCK_CACHE.createBlock(index, packet);
+            }
+
+            LOGGER.info("[FileFallback]本地文件已加载到缓存:{} ({} bytes, {} packets)",
+                    fileUrl, file.length(), packets.size());
+
+            // 返回完整的块列表
+            return SERVER_BLOCK_CACHE.getBlock(fileUrl);
+
+        } catch (Exception e) {
+            LOGGER.error("[FileFallback]加载本地文件失败:{} - {}", fileUrl, e.getLocalizedMessage());
+            return null;
+        }
     }
 }
