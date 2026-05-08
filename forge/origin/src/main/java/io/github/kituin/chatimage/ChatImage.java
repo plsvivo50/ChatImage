@@ -15,10 +15,13 @@ import io.github.kituin.chatimage.network.FileChannel;
 import io.github.kituin.chatimage.network.FileInfoChannel;
 import io.github.kituin.ChatImageCode.ChatImageCodeInstance;
 import io.github.kituin.ChatImageCode.ChatImageConfig;
+import io.github.kituin.ChatImageCode.ChatImageFrame;
+import io.github.kituin.ChatImageCode.ClientStorage;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 
@@ -32,16 +35,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.File;
-// IF > forge-1.18.2
-//import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
-// END IF
-// IF forge-1.16.5
-//import net.minecraftforge.fml.ExtensionPoint;
-// ELSE
-//import net.minecraft.commands.Commands;
-//import net.minecraftforge.client.event.RegisterClientCommandsEvent;
-//import net.minecraftforge.event.server.ServerStartingEvent;
-// END IF
+import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
+import net.minecraft.commands.Commands;
+import net.minecraftforge.client.event.RegisterClientCommandsEvent;
+import net.minecraftforge.event.server.ServerStartingEvent;
 
 import static com.mojang.brigadier.arguments.StringArgumentType.greedyString;
 
@@ -77,60 +74,76 @@ public class ChatImage {
             CONFIG = ChatImageConfig.loadConfig();
             ChatImageCodeInstance.CLIENT_ADAPTER = new ChatImageClientAdapter();
         }
-// IF >= forge-1.19
-//    @SubscribeEvent
-//    public static void onKeyBindRegister(RegisterKeyMappingsEvent event) {
-//        KeyBindings.init(event);
-//        LOGGER.info("KeyBindings Register");
-//    }
-// END IF
+
+        @SubscribeEvent
+        public static void onKeyBindRegister(RegisterKeyMappingsEvent event) {
+            KeyBindings.init(event);
+            LOGGER.info("KeyBindings Register");
+        }
 
         @SubscribeEvent
         public static void onClientSetup(FMLClientSetupEvent event) {
             LOGGER.info("[ChatImage]Client start");
-// IF >= forge-1.16 && < forge-1.19
-//           KeyBindings.init();
-//           LOGGER.info("KeyBindings Register");
-// END IF
-// IF forge-1.16.5
-//            ModLoadingContext.get().registerExtensionPoint(ExtensionPoint.CONFIGGUIFACTORY,
-//                    () -> (mc, screen) -> new ConfigScreen(screen));
-// ELSE
-//            ModLoadingContext.get().registerExtensionPoint(#ConfigScreenFactory#.class, () -> new #ConfigScreenFactory#((minecraft, screen) -> new ConfigScreen(screen)));
-//            MinecraftForge.EVENT_BUS.addListener(ClientModEvents::onClientCommand);
-// END IF
+            ModLoadingContext.get().registerExtensionPoint(net.minecraftforge.client.ConfigScreenHandler.ConfigScreenFactory.class, () -> new net.minecraftforge.client.ConfigScreenHandler.ConfigScreenFactory((minecraft, screen) -> new ConfigScreen(screen)));
+            MinecraftForge.EVENT_BUS.addListener(ClientModEvents::onClientCommand);
             MinecraftForge.EVENT_BUS.addListener(ClientModEvents::onKeyInput);
             MinecraftForge.EVENT_BUS.addListener(ClientModEvents::onClientStaring);
-        }
-// IF > forge-1.16.5
-//        public static void onClientCommand(RegisterClientCommandsEvent event) {
-//            CommandDispatcher<#CommandSourceStack#> dispatcher = event.getDispatcher();
-//            LiteralCommandNode<#CommandSourceStack#> cmd = dispatcher.register(
-//                    Commands.literal(MOD_ID)
-//                            .then(Commands.literal("send")
-//                                    .then(Commands.argument("name", StringArgumentType.string())
-//                                            .then(Commands.argument("url", greedyString())
-//                                                    .executes(SendChatImage.instance)
-//                                            )
-//                                    )
-//                            )
-//                            .then(Commands.literal("url")
-//                                    .then(Commands.argument("url", greedyString())
-//                                            .executes(SendChatImage.instance)
-//                                    )
-//                            )
-//                            .then(Commands.literal("help")
-//                                    .executes(Help.instance)
-//                            )
-//                            .then(Commands.literal("reload")
-//                                    .executes(ReloadConfig.instance)
-//                            )
-//
-//            );
-//        }
-// END IF
 
-        public static void onKeyInput(#InputEvent.Key# event) {
+            // ========== 新增：注册GIF动画Tick更新 ==========
+            MinecraftForge.EVENT_BUS.addListener(ClientModEvents::onClientTick);
+            LOGGER.info("[ChatImage]GIF动画Tick已注册");
+            // ==============================================
+        }
+
+        // ========== 新增：客户端Tick事件，驱动GIF动画（使用反射访问ClientStorage私有字段） ==========
+        public static void onClientTick(TickEvent.ClientTickEvent event) {
+            if (event.phase == TickEvent.Phase.END) {
+                try {
+                    java.lang.reflect.Field imagesField = ClientStorage.class.getDeclaredField("images");
+                    imagesField.setAccessible(true);
+                    @SuppressWarnings("unchecked")
+                    java.util.HashMap<String, ChatImageFrame> images =
+                            (java.util.HashMap<String, ChatImageFrame>) imagesField.get(null);
+
+                    for (ChatImageFrame frame : images.values()) {
+                        if (frame != null && frame.getSiblings().size() > 0) {
+                            frame.gifLoop(2);
+                        }
+                    }
+                } catch (Exception e) {
+                    // 静默失败，不影响正常功能
+                }
+            }
+        }
+        // ========================================================================================
+
+        public static void onClientCommand(RegisterClientCommandsEvent event) {
+            CommandDispatcher<net.minecraft.commands.CommandSourceStack> dispatcher = event.getDispatcher();
+            LiteralCommandNode<net.minecraft.commands.CommandSourceStack> cmd = dispatcher.register(
+                    Commands.literal(MOD_ID)
+                            .then(Commands.literal("send")
+                                    .then(Commands.argument("name", StringArgumentType.string())
+                                            .then(Commands.argument("url", greedyString())
+                                                    .executes(SendChatImage.instance)
+                                            )
+                                    )
+                            )
+                            .then(Commands.literal("url")
+                                    .then(Commands.argument("url", greedyString())
+                                            .executes(SendChatImage.instance)
+                                    )
+                            )
+                            .then(Commands.literal("help")
+                                    .executes(Help.instance)
+                            )
+                            .then(Commands.literal("reload")
+                                    .executes(ReloadConfig.instance)
+                            )
+
+            );
+        }
+
+        public static void onKeyInput(net.minecraftforge.client.event.InputEvent.Key event) {
             if (KeyBindings.gatherManaKeyMapping.consumeClick()) {
                 Minecraft.getInstance().setScreen(new ConfigScreen(Minecraft.getInstance().screen));
             }
